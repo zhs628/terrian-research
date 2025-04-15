@@ -1,0 +1,1 @@
+C:/Users/20671/AppData/Local/Microsoft/WindowsApps/python3.11.exe -m streamlit run main.py
