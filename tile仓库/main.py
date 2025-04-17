@@ -135,242 +135,357 @@ def init_engine():
 engine = init_engine()
 Session = sessionmaker(bind=engine)
 
-def tileset_editor_page():
-    st.title("Tileset 编辑器")
-    
+
+
+def update_tileset(tileset: Tileset) -> bool:
+
     with Session() as session:
-        # 1. Tileset 选择和管理
-        st.header("Tileset 管理")
-        
-        # 创建两列布局
-        col1, col2 = st.columns([1, 3])
-        
-        with col1:
-            # Tileset 选择器
-            
-            # 添加新 Tileset
-            with st.expander("添加新 Tileset"):
-                with st.form("new_tileset_form"):
-                    new_alias = st.text_input("别名")
-                    new_comments = st.text_area("备注")
-                    if st.form_submit_button("创建"):
-                        new_tileset = Tileset(
-                            alias=new_alias,
-                            comments=new_comments
-                        )
-                        session.add(new_tileset)
-                        session.commit()
-                        st.success("创建成功")
-                        st.rerun()
-        
-        with col2:
-            # 显示和编辑选中的 Tileset
-            tileset_df = pd.read_sql(select(Tileset), con=engine)
-            
-            # 可编辑的 Tileset 表单
-            st.subheader("编辑 Tileset 属性")
-            edited_tileset_df = st.data_editor(
-                tileset_df.sort_values(by=['id'], ascending=False),
-                key="tileset_editor",
-                use_container_width=True,
-                hide_index=True,
-                num_rows="dynamic",
-                column_config={
-                    "id": st.column_config.NumberColumn("ID", disabled=True),
-                    "alias": st.column_config.TextColumn("别名"),
-                    "is_deprecated": st.column_config.CheckboxColumn("已弃用"),
-                    "comments": st.column_config.TextColumn("备注")
-                }
-            )
-            
-            # 保存 Tileset 修改
-            if st.button("保存 Tileset 修改"):
-                # Get fresh data from database for comparison
-                original_tileset_df = pd.read_sql(select(Tileset), con=engine)
-                
-                changed = get_data_changes(
-                    edited_tileset_df, 
-                    original_tileset_df,
-                    ['id']
+        try:
+            session.execute(
+                update(Tileset)
+                .where(Tileset.id == getattr(tileset, 'id'))
+                .values(
+                    alias=getattr(tileset, 'alias'),
+                    is_deprecated=getattr(tileset, 'is_deprecated'),
+                    comments=getattr(tileset, 'comments')
                 )
-                print(changed)
-                if not changed['modified'].empty or not changed['added'].empty or not changed['deleted'].empty:
-                    try:
-                        # 初始化计数器
-                        modified_count = 0
-                        added_count = 0
-                        deleted_count = 0
-                        for _, row in changed['modified'].iterrows():
-                            session.execute(
-                                update(Tileset)
-                                .where(Tileset.id == row['id'])
-                                .values(
-                                    alias=row['alias'],
-                                    is_deprecated=row['is_deprecated'],
-                                    comments=row['comments']
-                                )
-                            )
-                            modified_count += 1
-                        for _, row in changed['added'].iterrows():
-                            session.execute(
-                                insert(Tileset)
-                                .values(
-                                    id=row["id"],
-                                    alias=row['alias'],
-                                    is_deprecated=row['is_deprecated'],
-                                    comments=row['comments']
-                                )
-                            )
-                            added_count += 1
-                        for _, row in changed['deleted'].iterrows():
-                            session.execute(
-                                delete(Tileset)
-                                .where(
-                                    Tileset.id==row["id"]
-                                )
-                            )
-                            deleted_count += 1
-                        session.commit()
+            )
+            session.commit()
+            st.toast(f"修改成功 {tileset}", icon="✅")
+            return True
+        except Exception as e:
+            session.rollback()
+            st.error("失败")
+            st.exception(e)
+            return False
+
+def add_tileset(tileset: Tileset) -> bool:
+    with Session() as session:
+        try:
+            session.execute(
+                insert(Tileset)
+                .values(
+                    id=getattr(tileset, 'id'),
+                    alias=getattr(tileset, 'alias'),
+                    is_deprecated=getattr(tileset, 'is_deprecated'),
+                    comments=getattr(tileset, 'comments')
+                )
+            )
+            session.commit()
+            st.toast(f"添加成功 {tileset}", icon="✅")
+            return True
+        except Exception as e:
+            session.rollback()
+            st.error("失败")
+            st.exception(e)
+            return False
+        
+def delete_tileset(tileset: Tileset) -> bool:
+    with Session() as session:
+        try:
+            session.execute(
+                delete(Tileset)
+                .where(
+                    Tileset.id==getattr(tileset, 'id')
+                )
+            )
+            session.commit()
+            st.toast(f"删除成功 {tileset}", icon="✅")
+            return True
+        except Exception as e:
+            session.rollback()
+            st.error("失败")
+            st.exception(e)
+            return False
+
+def tileset_editor_page():
+    st.title("tileset编辑器")
+    all_tilesets = pd.read_sql(select(Tileset), con=engine)
+    
+    for i, tileset in enumerate(all_tilesets.itertuples(index=True)):
+        with st.expander(f"{i}. {getattr(tileset, 'id')} | {getattr(tileset, 'alias')} | {'✅' if not getattr(tileset, 'is_deprecated') else '⬜'}", expanded=st.session_state.get(f'{i}.tileset_expander_last_status', default=False)):
+            index = getattr(tileset, 'Index')
+            
+            # 闭包工厂
+            def make_update_action(field, i, tileset, index):
+                def _update_action():
+                    
+                    # 修改对应expander状态
+                    for ii in range(all_tilesets.shape[0]):
+                        st.session_state[f'{ii}.tileset_expander_last_status'] = False
+                    st.session_state[f'{i}.tileset_expander_last_status'] = True
+                    
+                    # 干正事
+                    old_id = tileset.id
+                    new_value = st.session_state[f'{i}.tileset_update_{field}_new_val']
+                    new_tileset = tileset._replace(**{field: new_value})
+                    print(old_id, new_value, all_tilesets['id'].drop(index=index))
+                    if new_tileset.id in all_tilesets['id'].drop(index=index).to_list():
+                        st.session_state[f'{i}.tileset_update_id_new_val'] = old_id
+                        st.toast("❌ id 不能重复")
+                    elif update_tileset(new_tileset):
+                        all_tilesets.loc[index, field] = new_value
                         
-                        message = "修改已保存！"
-                        if modified_count > 0:
-                            message += f" 修改了 {modified_count} 条记录"
-                        if added_count > 0:
-                            message += f" 新增了 {added_count} 条记录"
-                        if deleted_count > 0:
-                            message += f" 删除了 {deleted_count} 条记录"
-                        st.success(message)
-                    except Exception as e:
-                        st.error("保存失败")
-                        st.exception(e)
-                else:
-                    st.info("没有检测到修改")
+                return _update_action
+            
+            st_columns = st.columns(5)
+            # ------------ 编辑 Tileset 
+            with st_columns[0]:
+                if f'{i}.tileset_update_id_new_val' not in st.session_state:
+                    st.session_state[f'{i}.tileset_update_id_new_val'] = tileset.id
+                _update_id_action = make_update_action('id', i, tileset, index)
+                new_val = st.number_input(f"{i}.  id",  step=1,
+                                            on_change=_update_id_action, key=f'{i}.tileset_update_id_new_val')
+            
+            with st_columns[1]:
+                _update_alias_action = make_update_action('alias', i, tileset, index)
+                new_val = st.text_input(f"{i}.  alias", 
+                                        value=tileset.alias,
+                                        on_change=_update_alias_action, key=f'{i}.tileset_update_alias_new_val')
+            
+            with st_columns[2]:
+                _update_deprecated_action = make_update_action('is_deprecated', i, tileset, index)
+                new_val = st.toggle(f"{i}.  is_deprecated", 
+                                    value=tileset.is_deprecated,
+                                    on_change=_update_deprecated_action, key=f'{i}.tileset_update_is_deprecated_new_val')
+            
+            with st_columns[3]:
+                _update_comments_action = make_update_action('comments', i, tileset, index)
+                new_val = st.text_area(f"{i}.  comments", value=tileset.comments, on_change=_update_comments_action, key=f'{i}.tileset_update_comments_new_val')
+
+
+            # ------------ 删除 Tileset
+            with st_columns[4]:
+                def _delete_action():
+                    if delete_tileset(tileset):
+                        all_tilesets.drop(index, inplace=True)
+                    
+                st.button(f"{i}.删除", on_click=_delete_action)
+            
+    # ------------ 新增 Tileset
+    def _add_action():
+        # 创建一个新的 Tileset 实例
+        new_tileset = Tileset(
+            alias="",
+            comments=""
+        )
+        
+        # 尝试添加新的 Tileset 到数据库
+        if add_tileset(new_tileset):
+            # 获取新添加的 Tileset 的 ID
+            new_tileset_id = new_tileset.id
+            
+            # 将新 Tileset 添加到 all_tilesets DataFrame 中
+            all_tilesets.loc[len(all_tilesets)] = [
+                new_tileset_id,
+                new_tileset.alias,
+                new_tileset.is_deprecated,
+                new_tileset.comments
+            ]
+            
+    st.button(f"Add TileSet", on_click=_add_action)
+        
 
 def tile_editor_page():
-    st.title("tile编辑器")
+    st.title("Tile 编辑器")
+    all_tilesets = pd.read_sql(select(Tileset), con=engine)
     
-    with Session() as session:
-        # 1. 获取所有 Tileset 供用户选择
-        all_tilesets = pd.read_sql(select(Tileset), con=engine)
-        
-        # 创建多选框让用户选择要查看的 Tileset
-        selected_options = st.multiselect(
-            "选择要查看的 Tileset",
-            options=all_tilesets['id'],
-            format_func=lambda x: f"ID:{x} - {all_tilesets.loc[all_tilesets['id'] == x, 'alias'].values[0]}"
-        )
-        if all_tilesets['id'].shape[0] == 0:
-            st.warning("请新建一个 Tileset")
-            return
-        elif not selected_options:
-            st.warning("请至少选择一个 Tileset")
-            return
-        
-        query = select(Tile).where(Tile.tileset_id.in_(selected_options))
-        tiles_df = pd.read_sql(query, con=engine)
-        
-        # 2. 显示可编辑表格
-        st.subheader("编辑 Tile 数据")
-        edited_df = st.data_editor(
-            tiles_df.sort_values(by=['tileset_id', 'id'], ascending=False),
-            key="tile_editor",
-            use_container_width=True,
-            hide_index=True,
-            num_rows="dynamic",
-            column_config={
-                "tileset_id": st.column_config.SelectboxColumn("tileset_id", options=selected_options, required=True),
-                "id": st.column_config.NumberColumn("id", required=True),
-                "char": st.column_config.TextColumn("char"),
-                "fg": st.column_config.TextColumn("fg"),
-                "bg": st.column_config.TextColumn("bg"),
-                "alias": st.column_config.TextColumn("alias"),
-                "is_deprecated": st.column_config.CheckboxColumn("is_deprecated", default=False),
-                "comments": st.column_config.TextColumn("comments")
-            }
-        )
-        
-        # 3. 比较并提交修改
-        if st.button("保存修改"):
-            # Get fresh data from database for comparison
-            original_df = pd.read_sql(query, con=engine)
+    # 创建多选框让用户选择要查看的 Tileset
+    selected_options = st.multiselect(
+        "选择要查看的 Tileset",
+        options=all_tilesets['id'],
+        format_func=lambda x: f"ID:{x} - {all_tilesets.loc[all_tilesets['id'] == x, 'alias'].values[0]}"
+    )
+    if all_tilesets['id'].shape[0] == 0:
+        st.warning("请新建一个 Tileset")
+        return
+    elif not selected_options:
+        st.warning("请至少选择一个 Tileset")
+        return
+    
+    query = select(Tile).where(Tile.tileset_id.in_(selected_options))
+    all_tiles = pd.read_sql(query, con=engine)
+    print(all_tiles)
+    
+    for i, tile in enumerate(all_tiles.itertuples(index=True)):
+        with st.expander(f"{i}.  {getattr(tile, 'tileset_id')} | {getattr(tile, 'id')} | {getattr(tile, 'char')} | {getattr(tile, 'alias')} | {'✅' if not getattr(tile, 'is_deprecated') else '⬜'}", expanded=st.session_state.get(f'{i}.tile_expander_last_status', default=False)):
+            index = getattr(tile, 'Index')
             
-            # 找出被修改的行
-            changed = get_data_changes(edited_df, original_df, ['tileset_id', 'id'])
-            print(changed)
-            if not changed['modified'].empty or not changed['added'].empty or not changed['deleted'].empty:
-                try:
-                    # 初始化计数器
-                    modified_count = 0
-                    added_count = 0
-                    deleted_count = 0
+            # 闭包工厂
+            def make_update_action(field, i, tile, index):
+                def _update_action():
+                    # 修改对应expander状态
+                    for ii in range(all_tiles.shape[0]):
+                        st.session_state[f'{ii}.tile_expander_last_status'] = False
+                    st.session_state[f'{i}.tile_expander_last_status'] = True
                     
-                    # 更新数据库 - 修改记录
-                    for idx, row in changed['modified'].iterrows():
-                        # 获取原始ID
-                        tileset_id = row['tileset_id']
-                        tile_id = row['id']
+                    # 干正事
+                    old_id = tile.id
+                    new_value = st.session_state[f'{i}.tile_update_{field}_new_val']
+                    new_tile = tile._replace(**{field: new_value})
+                    if new_tile.id in all_tiles['id'].drop(index=index).to_list():
+                        st.session_state[f'{i}.tile_update_id_new_val'] = old_id
+                        st.toast("❌ id 不能重复")
+                    elif update_tile(new_tile):
+                        all_tiles.loc[index, field] = new_value
                         
-                        # 更新记录
-                        session.execute(
-                            update(Tile)
-                            .where(Tile.tileset_id == tileset_id)
-                            .where(Tile.id == tile_id)
-                            .values(
-                                char=row['char'],
-                                fg=row['fg'],
-                                bg=row['bg'],
-                                alias=row['alias'],
-                                is_deprecated=row['is_deprecated'],
-                                comments=row['comments']
-                            )
-                        )
-                        modified_count += 1
-                    
-                    # 添加新记录
-                    for _, row in changed['added'].iterrows():
-                        session.execute(
-                            insert(Tile)
-                            .values(
-                                id=row["id"],
-                                tileset_id=row["tileset_id"],
-                                char=row['char'],
-                                fg=row['fg'],
-                                bg=row['bg'],
-                                alias=row['alias'],
-                                is_deprecated=row['is_deprecated'],
-                                comments=row['comments']
-                            )
-                        )
-                        added_count += 1
-                    
-                    # 删除记录
-                    for _, row in changed['deleted'].iterrows():
-                        session.execute(
-                            delete(Tile)
-                            .where(Tile.tileset_id == row["tileset_id"])
-                            .where(Tile.id == row["id"])
-                        )
-                        deleted_count += 1
-                    
-                    session.commit()
-                    
-                    # 构建成功消息
-                    message = "修改已保存！"
-                    if modified_count > 0:
-                        message += f" 修改了 {modified_count} 条记录"
-                    if added_count > 0:
-                        message += f" 新增了 {added_count} 条记录"
-                    if deleted_count > 0:
-                        message += f" 删除了 {deleted_count} 条记录"
-                    
-                    st.success(message)
-                    
-                except Exception as e:
-                    session.rollback()
-                    st.error("保存失败")
-                    st.exception(e)
-            else:
-                st.info("没有检测到修改")
+                return _update_action
+            
+            st_columns = st.columns(7)
+            # ------------ 编辑 Tile 
+            with st_columns[0]:
+                if f'{i}.tile_update_tileset_id_new_val' not in st.session_state:
+                    st.session_state[f'{i}.tile_update_tileset_id_new_val'] = tile.tileset_id
+                _update_tileset_id_action = make_update_action('tileset_id', i, tile, index)
+                new_val = st.selectbox(f"{i}.  tileset_id",  options=all_tilesets['id'],
+                                            on_change=_update_tileset_id_action, key=f'{i}.tile_update_tileset_id_new_val', disabled=True)
+            
+            with st_columns[0]:
+                if f'{i}.tile_update_id_new_val' not in st.session_state:
+                    st.session_state[f'{i}.tile_update_id_new_val'] = tile.id
+                _update_id_action = make_update_action('id', i, tile, index)
+                new_val = st.number_input(f"{i}.  id",  step=1,
+                                            on_change=_update_id_action, key=f'{i}.tile_update_id_new_val')
+            
+            with st_columns[1]:
+                _update_char_action = make_update_action('char', i, tile, index)
+                new_val = st.text_input(f"{i}.  char", 
+                                        value=tile.char,
+                                        on_change=_update_char_action, key=f'{i}.tile_update_char_new_val')
+            
+            with st_columns[2]:
+                _update_fg_action = make_update_action('fg', i, tile, index)
+                new_val = st.color_picker(f"{i}.  fg", 
+                                        value=tile.fg,
+                                        on_change=_update_fg_action, key=f'{i}.tile_update_fg_new_val')
+            
+            with st_columns[2]:
+                _update_bg_action = make_update_action('bg', i, tile, index)
+                new_val = st.color_picker(f"{i}.  bg", 
+                                        value=tile.bg,
+                                        on_change=_update_bg_action, key=f'{i}.tile_update_bg_new_val')
+            
+            with st_columns[3]:
+                _update_alias_action = make_update_action('alias', i, tile, index)
+                new_val = st.text_input(f"{i}.  alias", 
+                                        value=tile.alias,
+                                        on_change=_update_alias_action, key=f'{i}.tile_update_alias_new_val')
+            with st_columns[4]:
+                _update_deprecated_action = make_update_action('is_deprecated', i, tile, index)
+                new_val = st.toggle(f"{i}.  is_deprecated", 
+                                    value=tile.is_deprecated,
+                                    on_change=_update_deprecated_action, key=f'{i}.tile_update_is_deprecated_new_val')
+            with st_columns[5]:
+                _update_comments_action = make_update_action('comments', i, tile, index)
+                new_val = st.text_area(f"{i}.  comments", value=tile.comments, on_change=_update_comments_action, key=f'{i}.tile_update_comments_new_val')
+
+            # ------------ 删除 Tile
+            with st_columns[6]:
+                def _delete_action():
+                    if delete_tile(tile):
+                        all_tiles.drop(index, inplace=True)
+                st.button(f"{i}.  删除", on_click=_delete_action)
+            
+    # ------------ 新增 Tile
+    def _add_action():
+        # 创建一个新的 Tile 实例
+        new_tile = Tile(
+            tileset_id=selected_options[0],
+            alias="",
+            comments=""
+        )
+        
+        # 尝试添加新的 Tile 到数据库
+        if add_tile(new_tile):
+            # 获取新添加的 Tile 的 ID
+            new_tile_id = new_tile.id
+            
+            # 将新 Tile 添加到 all_tiles DataFrame 中
+            all_tiles.loc[len(all_tiles)] = [
+                new_tile.tileset_id,
+                new_tile.id,
+                new_tile.char,
+                new_tile.fg,
+                new_tile.bg,
+                new_tile.alias,
+                new_tile.is_deprecated,
+                new_tile.comments
+            ]
+            
+    st.button(f"Add Tile", on_click=_add_action)
+
+# 更新和删除 Tile 的函数
+def update_tile(tile: Tile) -> bool:
+    with Session() as session:
+        try:
+            session.execute(
+                update(Tile)
+                .where(Tile.tileset_id == getattr(tile, 'tileset_id'))
+                .where(Tile.id == getattr(tile, 'id'))
+                .values(
+                    char=getattr(tile, 'char'),
+                    fg=getattr(tile, 'fg'),
+                    bg=getattr(tile, 'bg'),
+                    alias=getattr(tile, 'alias'),
+                    is_deprecated=getattr(tile, 'is_deprecated'),
+                    comments=getattr(tile, 'comments')
+                )
+            )
+            session.commit()
+            st.toast(f"修改成功 {tile}", icon="✅")
+            return True
+        except Exception as e:
+            session.rollback()
+            st.error("失败")
+            st.exception(e)
+            return False
+
+def add_tile(tile: Tile) -> bool:
+    with Session() as session:
+        try:
+            session.execute(
+                insert(Tile)
+                .values(
+                    tileset_id=getattr(tile, 'tileset_id'),
+                    id=getattr(tile, 'id'),
+                    char=getattr(tile, 'char'),
+                    fg=getattr(tile, 'fg'),
+                    bg=getattr(tile, 'bg'),
+                    alias=getattr(tile, 'alias'),
+                    is_deprecated=getattr(tile, 'is_deprecated'),
+                    comments=getattr(tile, 'comments')
+                )
+            )
+            session.commit()
+            st.toast(f"添加成功 {tile}", icon="✅")
+            return True
+        except Exception as e:
+            session.rollback()
+            st.error("失败")
+            st.exception(e)
+            return False
+
+def delete_tile(tile: Tile) -> bool:
+    with Session() as session:
+        try:
+            session.execute(
+                delete(Tile)
+                .where(
+                    Tile.tileset_id == getattr(tile, 'tileset_id'),
+                    Tile.id == getattr(tile, 'id')
+                )
+            )
+            session.commit()
+            st.toast(f"删除成功 {tile}", icon="✅")
+            return True
+        except Exception as e:
+            session.rollback()
+            st.error("失败")
+            st.exception(e)
+            return False
+
+
+
 
 def main():
     tab1, tab2, tab3 = st.tabs(["tile编辑器", "tilset编辑器", "导出"])
