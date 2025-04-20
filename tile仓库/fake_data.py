@@ -1,3 +1,4 @@
+from traceback import format_exc
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from faker import Faker
@@ -27,7 +28,7 @@ def generate_random_tilesets(num=5):
 
 def generate_random_tiles(tileset, num=20):
     """为单个Tileset生成随机Tile数据"""
-    for tile_id in range(1, num+1):
+    for tile_id in range(0, num+1):
         yield Tile(
             tileset_id=tileset.id,
             id=tile_id,
@@ -52,10 +53,15 @@ try:
         for tile in generate_random_tiles(tileset, 10):
             session.add(tile)
     
+    
+    
     session.commit()
     print("数据插入成功！")
+    
+    reset_next_tile_ids(engine=engine)
+    
 except Exception as e:
     session.rollback()
-    print(f"插入数据时出错: {str(e)}")
+    print(f"插入数据时出错: {format_exc()}")
 finally:
     session.close()

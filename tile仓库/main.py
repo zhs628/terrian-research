@@ -1,8 +1,9 @@
+import dis
 import streamlit as st
 import pandas as pd
 from sqlalchemy import create_engine, select, update, insert, delete
 from sqlalchemy.orm import sessionmaker
-from schema import Tile, Tileset, Base  
+from schema import Tile, Tileset, Base
 import traceback
 
 
@@ -19,7 +20,7 @@ def export_to_json(engine, indent: int = 2) -> str:
     # 准备导出的数据结构
     data: Dict[str, List[Dict[str, Any]]] = {
         "tilesets": [],
-        "tiles": []
+        "tiles": [],
     }
     
     try:
@@ -120,20 +121,6 @@ def get_data_changes(edited_df, original_df, key_columns):
     }
 
 
-# 初始化数据库连接
-@st.cache_resource
-def init_engine():
-    
-    # REPOSITORY_VERSION = "v_0.0.0.1"
-    REPOSITORY_VERSION = "fake_data"
-    
-    engine = create_engine(f'sqlite:///{REPOSITORY_VERSION}.db')
-    Base.metadata.create_all(engine)
-    
-    return engine
-
-engine = init_engine()
-Session = sessionmaker(bind=engine)
 
 
 
@@ -165,7 +152,7 @@ def add_tileset(tileset: Tileset) -> bool:
             session.execute(
                 insert(Tileset)
                 .values(
-                    id=getattr(tileset, 'id'),
+                    
                     alias=getattr(tileset, 'alias'),
                     is_deprecated=getattr(tileset, 'is_deprecated'),
                     comments=getattr(tileset, 'comments')
@@ -189,8 +176,16 @@ def delete_tileset(tileset: Tileset) -> bool:
                     Tileset.id==getattr(tileset, 'id')
                 )
             )
+            
+            session.execute(
+                delete(Tile)
+                .where(
+                    Tile.tileset_id==getattr(tileset, 'id')
+                )
+            )
+            
             session.commit()
-            st.toast(f"删除成功 {tileset}", icon="✅")
+            st.toast(f"删除成功 {tileset} ", icon="✅")
             return True
         except Exception as e:
             session.rollback()
@@ -216,14 +211,9 @@ def tileset_editor_page():
                     st.session_state[f'{i}.tileset_expander_last_status'] = True
                     
                     # 干正事
-                    old_id = tileset.id
                     new_value = st.session_state[f'{i}.tileset_update_{field}_new_val']
                     new_tileset = tileset._replace(**{field: new_value})
-                    print(old_id, new_value, all_tilesets['id'].drop(index=index))
-                    if new_tileset.id in all_tilesets['id'].drop(index=index).to_list():
-                        st.session_state[f'{i}.tileset_update_id_new_val'] = old_id
-                        st.toast("❌ id 不能重复")
-                    elif update_tileset(new_tileset):
+                    if update_tileset(new_tileset):
                         all_tilesets.loc[index, field] = new_value
                         
                 return _update_action
@@ -235,7 +225,7 @@ def tileset_editor_page():
                     st.session_state[f'{i}.tileset_update_id_new_val'] = tileset.id
                 _update_id_action = make_update_action('id', i, tileset, index)
                 new_val = st.number_input(f"{i}.  id",  step=1,
-                                            on_change=_update_id_action, key=f'{i}.tileset_update_id_new_val')
+                                            on_change=_update_id_action, key=f'{i}.tileset_update_id_new_val', disabled=True)
             
             with st_columns[1]:
                 _update_alias_action = make_update_action('alias', i, tileset, index)
@@ -280,6 +270,7 @@ def tileset_editor_page():
                 new_tileset_id,
                 new_tileset.alias,
                 new_tileset.is_deprecated,
+                new_tileset.next_tile_id,
                 new_tileset.comments
             ]
             
@@ -320,16 +311,26 @@ def tile_editor_page():
                     st.session_state[f'{i}.tile_expander_last_status'] = True
                     
                     # 干正事
-                    old_id = tile.id
                     new_value = st.session_state[f'{i}.tile_update_{field}_new_val']
                     new_tile = tile._replace(**{field: new_value})
-                    if new_tile.id in all_tiles['id'].drop(index=index).to_list():
-                        st.session_state[f'{i}.tile_update_id_new_val'] = old_id
-                        st.toast("❌ id 不能重复")
-                    elif update_tile(new_tile):
+                    if update_tile(new_tile):
                         all_tiles.loc[index, field] = new_value
                         
                 return _update_action
+            
+            def make_delete_action(i, tile, index):
+                def _delete_action():
+                    # 删除对应的tile
+                    if delete_tile(tile):  # 假设有一个delete_tile函数来执行实际删除操作
+                        all_tiles.drop(index=index, inplace=True)
+                        # 重置所有expander状态
+                        for ii in range(all_tiles.shape[0]):
+                            st.session_state[f'{ii}.tile_expander_last_status'] = False
+                        st.toast("✅ 删除成功")
+                    else:
+                        st.toast("❌ 删除失败")
+                        
+                return _delete_action
             
             st_columns = st.columns(7)
             # ------------ 编辑 Tile 
@@ -345,7 +346,7 @@ def tile_editor_page():
                     st.session_state[f'{i}.tile_update_id_new_val'] = tile.id
                 _update_id_action = make_update_action('id', i, tile, index)
                 new_val = st.number_input(f"{i}.  id",  step=1,
-                                            on_change=_update_id_action, key=f'{i}.tile_update_id_new_val')
+                                            on_change=_update_id_action, key=f'{i}.tile_update_id_new_val', disabled=True)
             
             with st_columns[1]:
                 _update_char_action = make_update_action('char', i, tile, index)
@@ -381,16 +382,23 @@ def tile_editor_page():
 
             # ------------ 删除 Tile
             with st_columns[6]:
-                def _delete_action():
-                    if delete_tile(tile):
-                        all_tiles.drop(index, inplace=True)
-                st.button(f"{i}.  删除", on_click=_delete_action)
-            
+                st.write(tile)
+                st.button(
+                    f"{i}.  删除", 
+                    on_click=make_delete_action(i, tile, index)
+                )
+    
+    
+    add_col1, add_col2 = st.columns(2)
+    
+    with add_col1:
+        new_tile_tileset_id = st.selectbox(f"新增tile至:",  options=all_tilesets['id'], )
+        
     # ------------ 新增 Tile
     def _add_action():
         # 创建一个新的 Tile 实例
         new_tile = Tile(
-            tileset_id=selected_options[0],
+            tileset_id=new_tile_tileset_id,
             alias="",
             comments=""
         )
@@ -411,8 +419,8 @@ def tile_editor_page():
                 new_tile.is_deprecated,
                 new_tile.comments
             ]
-            
-    st.button(f"Add Tile", on_click=_add_action)
+    with add_col2:
+        st.button(f"Add Tile", on_click=_add_action)
 
 # 更新和删除 Tile 的函数
 def update_tile(tile: Tile) -> bool:
@@ -441,13 +449,21 @@ def update_tile(tile: Tile) -> bool:
             return False
 
 def add_tile(tile: Tile) -> bool:
+    
+    if tile.id is not None:
+        raise Exception("Tile id should be None")
+    
     with Session() as session:
         try:
+            
+            next_tile_id = session.query(Tileset).filter_by(id=getattr(tile, 'tileset_id')).first().next_tile_id
+            
+            # 插入新的 Tile
             session.execute(
                 insert(Tile)
                 .values(
                     tileset_id=getattr(tile, 'tileset_id'),
-                    id=getattr(tile, 'id'),
+                    id=next_tile_id,
                     char=getattr(tile, 'char'),
                     fg=getattr(tile, 'fg'),
                     bg=getattr(tile, 'bg'),
@@ -456,9 +472,14 @@ def add_tile(tile: Tile) -> bool:
                     comments=getattr(tile, 'comments')
                 )
             )
+            
+            # 更新所属 tileset 的 next_tile_id
+            session.query(Tileset).filter_by(id=1).update({'next_tile_id':next_tile_id+1})
+            
             session.commit()
             st.toast(f"添加成功 {tile}", icon="✅")
             return True
+        
         except Exception as e:
             session.rollback()
             st.error("失败")
@@ -481,8 +502,26 @@ def delete_tile(tile: Tile) -> bool:
         except Exception as e:
             session.rollback()
             st.error("失败")
-            st.exception(e)
+            st.error(traceback.format_exc())
             return False
+
+
+
+
+
+# 初始化数据库连接
+@st.cache_resource
+def init_engine():
+    
+    # REPOSITORY_VERSION = "v_0.0.0.1"
+    REPOSITORY_VERSION = "fake_data"
+    
+    engine = create_engine(f'sqlite:///{REPOSITORY_VERSION}.db')
+    Base.metadata.create_all(engine)
+    return engine
+
+engine = init_engine()
+Session = sessionmaker(bind=engine)
 
 
 
