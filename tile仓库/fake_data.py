@@ -21,8 +21,7 @@ def generate_random_tilesets(num=5):
     """生成随机Tileset数据"""
     for _ in range(num):
         yield Tileset(
-            alias=fake.unique.word().capitalize() + " Set",
-            is_deprecated=random.choices([True, False], weights=[0.2, 0.8])[0],
+            name=fake.unique.word().capitalize() + " Set",
             comments=fake.sentence() if random.random() < 0.7 else None
         )
 
@@ -35,8 +34,6 @@ def generate_random_tiles(tileset, num=20):
             char=random.choice(tiles),
             fg=fake.hex_color(),
             bg=fake.hex_color(),
-            alias=fake.word().title(),
-            is_deprecated=random.choices([True, False], weights=[0.1, 0.9])[0],
             comments=fake.sentence() if random.random() < 0.6 else None
         )
 
