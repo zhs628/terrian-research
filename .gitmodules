@@ -1,0 +1,3 @@
+[submodule "brogue-rpg"]
+	path = brogue-rpg
+	url = https://github.com/blueloveTH/brogue-rpg.git
