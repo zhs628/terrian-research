@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from linalg import vec3i
+from vmath import vec3i
 
 class AsciiSprite:
     def __init__(self, char: str, fg: str | None = None, bg: str | None = None):
@@ -31,6 +31,8 @@ class TilesetId:
     Fire = 6
     Wall = 7
     Tree = 8
+    
+    Direction = 9
 
 
 _db = [
@@ -46,6 +48,8 @@ _db = [
     Tileset(TilesetId.Ground, [
         AsciiSprite('・'),
         AsciiSprite('・', bg="#314c6e"),
+        AsciiSprite('・', bg="#ffda79"),  # 中海拔
+        AsciiSprite('・', bg="#f9ca24"), # 高海拔
     ]),
     # 地板
     Tileset(TilesetId.Floor, [
@@ -67,7 +71,7 @@ _db = [
     # https://unicode.party/?query=mountain
     Tileset(TilesetId.Wall, [
         AsciiSprite('🧱'),
-        AsciiSprite('🪨'),
+        AsciiSprite('🪨 '),
         AsciiSprite('🧊'),
         AsciiSprite('⛰️'),
         AsciiSprite('🏔️'),
@@ -83,6 +87,18 @@ _db = [
         AsciiSprite('🎋'),
         AsciiSprite('🌳'),
     ]),
+    
+    
+    Tileset(TilesetId.Direction, [
+            AsciiSprite('↑​ '),
+            AsciiSprite('↗ '),
+            AsciiSprite('→ '),
+            AsciiSprite('↘ '),
+            AsciiSprite('↓ '),
+            AsciiSprite('↙️ ​​'),
+            AsciiSprite('← '),
+            AsciiSprite('↖️ '),
+        ]),
 ]
 
 def get_sprite(tileset_id: int, index: int) -> AsciiSprite:

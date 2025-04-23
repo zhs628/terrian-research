@@ -1,1 +1,1 @@
-main.exe N.py
+main.exe test2.py

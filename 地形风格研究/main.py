@@ -1,6 +1,6 @@
 import streamlit as st
 import numpy as np
-from perlin import Perlin
+from noises.perlin import Perlin
 import matplotlib.pyplot as plt
 import io
 from datetime import datetime
@@ -590,9 +590,8 @@ base_config = {pprint.pformat(base_config, indent=4).replace('newline_char', '  
 layers_config = {pprint.pformat(layers_config, indent=4).replace('newline_char', '    ').replace('newline_char', '    ')}
 
 
-perlin_generator = Perlin(seed=base_config['seed'])
 
-def noise(v: vec2i):
+def noise(v: vec2, seed=base_config['seed'])->float:
     '''对硬编码参数的Perlin噪声采样'''
     combined_noise = 0
     for layer in layers_config:
@@ -600,7 +599,7 @@ def noise(v: vec2i):
             layer['scale'], layer['octaves(for pkpy)'], layer['persistence'],
             layer['lacunarity'], layer['operations']
         )
-        noise = perlin_generator.noise_ex(v.x/scale, v.y/scale, 0,
+        noise = perlin_generator = Perlin(seed=seed).noise_ex(v.x/scale, v.y/scale, 0,
                     octaves,
                     persistence=persistence,
                     lacunarity=lacunarity)
