@@ -11,7 +11,7 @@ from noises import test_noise
 TileIndex = vec2i
  
 # 配置参数
-VIEW_SIZE = 100    # 视口尺寸
+VIEW_SIZE = 50    # 视口尺寸
 
 BASE_POSITION = vec2i(0,0)
 
@@ -22,7 +22,10 @@ world: chunked_array2d[vec2i] = chunked_array2d(16)
 SAMPLING_DISTANCE = 1
 
 
-def gradient(pos: vec2, noise_func: Callable[[vec2], float], d: float = 0.1) -> vec2:
+
+
+
+def gradient(pos: vec2, noise_func: Callable[[vec2], float], d: float = 0.5) -> vec2:
     x, y = pos
     k = 1/(2 * d)
     k_diag = 1/(2 * d * math.sqrt(2))
@@ -100,8 +103,8 @@ def compute_tile_on_(global_pos:vec2i) -> TileIndex:
     gradient_value = ground_noise_g.length()
     
     # beach
-    is_plat = not threshold(gradient_value, 0.003) and is_ground_area
-    
+    is_plat = not threshold(gradient_value, 0.02) and is_ground_area
+    # is_plat = is_ground_area
     is_beach = is_plat and is_ground_edge_area
     
     plat_beach_layer = TileIndex(TilesetId.Tree, 2) if is_beach else None
@@ -119,7 +122,7 @@ def compute_tile_on_(global_pos:vec2i) -> TileIndex:
         ground_layer,  # 浅黄色地面 (海平面以上)
         higher_ground_layer,  # 柠檬黄地面  (海拔更高的地方)
         plat_beach_layer,  # 椰子树  (海平面以上, 海拔低, 坡度小)
-        cliff_layer  # 石头 (海平面以上, 坡度大)
+        # cliff_layer  # 石头 (海平面以上, 坡度大)
     ]
     result = None
     for layer in layers[::-1]:
