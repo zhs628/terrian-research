@@ -1,1 +1,1 @@
-main.exe test2.py
+main.exe noises/test_noise.py

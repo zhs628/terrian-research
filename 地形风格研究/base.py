@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from vmath import vec3i
 
 class AsciiSprite:
@@ -31,8 +30,10 @@ class TilesetId:
     Fire = 6
     Wall = 7
     Tree = 8
+    Special = 9
     
-    Direction = 9
+    Direction = 10
+    Height = 11
 
 
 _db = [
@@ -47,9 +48,9 @@ _db = [
     # 地基
     Tileset(TilesetId.Ground, [
         AsciiSprite('・'),
-        AsciiSprite('・', bg="#314c6e"),
-        AsciiSprite('・', bg="#ffda79"),  # 中海拔
-        AsciiSprite('・', bg="#f9ca24"), # 高海拔
+        AsciiSprite('・', bg="#314c6e"),  # 高海拔
+        AsciiSprite('・', bg="#ffda79"),  # 低海拔
+        AsciiSprite('・', bg="#f9ca24"), # 中海拔
     ]),
     # 地板
     Tileset(TilesetId.Floor, [
@@ -83,23 +84,41 @@ _db = [
     Tileset(TilesetId.Tree, [
         AsciiSprite('🌲'),
         AsciiSprite('🎄'),
-        AsciiSprite('🌴'),
+        AsciiSprite('🌴', bg="#ffda79"),
+        AsciiSprite('🌴', bg="#f9ca24"),
         AsciiSprite('🎋'),
         AsciiSprite('🌳'),
     ]),
     
+    # 特殊点
+    Tileset(TilesetId.Special, [
+        AsciiSprite('🛕'),
+    ]),
     
     Tileset(TilesetId.Direction, [
-            AsciiSprite('↑​ '),
-            AsciiSprite('↗ '),
-            AsciiSprite('→ '),
-            AsciiSprite('↘ '),
-            AsciiSprite('↓ '),
-            AsciiSprite('↙️ ​​'),
-            AsciiSprite('← '),
-            AsciiSprite('↖️ '),
+            AsciiSprite('↑​'),
+            AsciiSprite('↗'),
+            AsciiSprite('→'),
+            AsciiSprite('↘'),
+            AsciiSprite('↓'),
+            AsciiSprite('↙️​​'),
+            AsciiSprite('←'),
+            AsciiSprite('↖️'),
+        ]),
+    
+    Tileset(TilesetId.Height, [
+            AsciiSprite('１', bg="#fef4f4", fg="#44bd32"),
+            AsciiSprite('２', bg="#fdeff2", fg="#44bd32"),
+            AsciiSprite('３', bg="#e9dfe5", fg="#44bd32"),
+            AsciiSprite('４', bg="#e4d2d8", fg="#44bd32"),
+            AsciiSprite('５', bg="#f6bfbc", fg="#44bd32"),
+            AsciiSprite('６', bg="#f5b1aa", fg="#44bd32"),
+            AsciiSprite('７', bg="#f5b199", fg="#44bd32"),
+            AsciiSprite('８', bg="#efab93", fg="#44bd32"),
         ]),
 ]
 
 def get_sprite(tileset_id: int, index: int) -> AsciiSprite:
-    return _db[tileset_id].sprites[index]
+    s = _db[tileset_id].sprites[index]
+    assert '​​' not in s.char  # 避免隐形空格
+    return s

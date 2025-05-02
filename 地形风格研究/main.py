@@ -1,19 +1,62 @@
+from anyio import key
+import noise
 import streamlit as st
 import numpy as np
 from noises.perlin import Perlin
+from noises.voronoi import Voronoi
 import matplotlib.pyplot as plt
 import io
 from datetime import datetime
 import json
 import pprint
+from scipy.ndimage import laplace
+from scipy.signal import convolve2d
+import pickle
 
 
 plt.rcParams["font.sans-serif"] = ["SimHei"]  # 使用黑体显示中文
 plt.rcParams["axes.unicode_minus"] = False  # 解决负号显示问题
 st.set_page_config(layout="wide")
 
+def float_distribution(arr, bins=10, range=None):
+    # 将二维数组展平为一维
+    flattened = np.array(arr).flatten()
+    # 计算直方图
+    counts, bin_edges = np.histogram(flattened, bins=bins, range=range)
+    # 返回桶边界和计数
+    return bin_edges, counts
 
 
+def nested_hash(obj):
+    """
+    生成嵌套结构的哈希值，处理字典、列表和基本对象
+    """
+    if isinstance(obj, (int, float, str, bool, bytes)) or obj is None:
+        return hash(obj)
+    elif isinstance(obj, (tuple, frozenset)):
+        return hash(tuple(nested_hash(e) for e in obj))
+    elif isinstance(obj, list):
+        return hash(tuple(nested_hash(e) for e in obj))
+    elif isinstance(obj, dict):
+        return hash(tuple(sorted((k, nested_hash(v)) for k, v in obj.items())))
+    elif hasattr(obj, "__dict__"):
+        return nested_hash(vars(obj))
+    else:
+        raise TypeError(f"不可哈希类型: {type(obj)}")
+
+
+def get_param_state_hash():
+    return nested_hash(get_param_state())
+
+
+def get_param_state():
+    if "param" not in st.session_state:
+        st.session_state.param = {}
+        st.session_state.param["world_size"] = 64
+        st.session_state.param["seed"] = 123456
+        st.session_state.param["layer_params"] = []
+        st.session_state.param["post_operations"] = []
+    return st.session_state.param
 
 
 def terrain_to_ascii(terrain, chars=[".", "*", "#"], size=(40, 40)):
@@ -78,15 +121,6 @@ def terrain_to_ascii(terrain, chars=[".", "*", "#"], size=(40, 40)):
     return "\n".join(ascii_art)
 
 
-# 初始化session状态
-if "noise_layers" not in st.session_state:
-    st.session_state.noise_layers = []
-    st.session_state.world_size = 64
-    st.session_state.combined = np.zeros(
-        (st.session_state.world_size, st.session_state.world_size)
-    )
-
-
 # 噪声生成核心函数
 def generate_perlin_noise(
     width, height, scale=100.0, octaves=6, persistence=0.5, lacunarity=2.0, seed=123456
@@ -94,7 +128,7 @@ def generate_perlin_noise(
     world = np.zeros((height, width))
     for y in range(height):
         for x in range(width):
-            world[x,y] = Perlin(seed=seed).noise_ex(
+            world[x, y] = Perlin(seed=seed).noise_ex(
                 x / scale,
                 y / scale,
                 0,
@@ -115,51 +149,123 @@ def generate_perlin_noise(
     return world
 
 
+def generate_voronoi_noise(
+    width,
+    height,
+    scale=100.0,
+    radius=1,
+    falloff=8.0,
+    octaves=6,
+    persistence=0.5,
+    lacunarity=2.0,
+    seed=123456,
+):
+    world = np.zeros((height, width))
+    for y in range(height):
+        for x in range(width):
+            world[x, y] = Voronoi(seed=seed).noise_ex(
+                x / scale,
+                y / scale,
+                0,
+                radius=radius,
+                falloff=falloff,
+                octaves=octaves,
+                persistence=persistence,
+                lacunarity=lacunarity,
+            )
+            # if x==10 and y==10:
+            #     print(world[x,y], (
+            #                     x / scale,
+            #                     y / scale,
+            #                     0,
+            #                     octaves,
+            #                     persistence,
+            #                     lacunarity
+            #                 )
+            #           )
+    return world
+
+
 # 数学运算层处理器
-def apply_math_operations(layer, operations):
+def apply_math_operations(padded_data, operations):
+    padded_data = padded_data.copy()
     for op, param in operations:
         if op == "Power(x, param)":
-            layer = np.power(layer, param)
+            padded_data = np.power(padded_data, param)
+        elif op == "Power(param, x)":
+            padded_data = np.power(param, padded_data)
         elif op == "Log(x, param)":
-            layer = np.log(np.abs(layer) + 1e-9)
+            padded_data = np.log(np.abs(padded_data) + 1e-9)
         elif op == "Sigmoid(x, param)":
-            layer = 1 / (1 + np.exp(-param * layer))
+            padded_data = 1 / (1 + np.exp(-param * padded_data))
         elif op == "Threshold(x, param)":
-            layer = np.where(layer > param, 1.0, 0.0)
+            padded_data = np.where(padded_data > param, 1.0, 0.0)
         elif op == "Add(x, param)":
-            layer = layer + param
+            padded_data = padded_data + param
         elif op == "Multiply(x, param)":
-            layer = layer * param
-    return layer
+            padded_data = padded_data * param
+        elif op == "Laplace(pos)":
+            padded_data = laplace(padded_data)
+        elif op == 'GradientMagnitude(pos)':
+            kernel_x = np.array([[-1, 0, 1], 
+                                [-2, 0, 2], 
+                                [-1, 0, 1]])
+            kernel_y = np.array([[-1, -2, -1], 
+                                [0, 0, 0], 
+                                [1, 2, 1]])
+            gradient_x = convolve2d(padded_data, kernel_x, mode='same', boundary='symm')
+            gradient_y = convolve2d(padded_data, kernel_y, mode='same', boundary='symm')
+            padded_data = np.sqrt(gradient_x**2 + gradient_y**2)
+        else:
+            raise ValueError(f"未知运算符: {op}")
+    return padded_data[1:-1, 1:-1]
 
 
 # 界面布局
 st.title("🌍 交互式柏林噪声生成器")
 
 with st.sidebar:
+
+    
+    with st.expander("💾 网页缓存"):
+        pkl = st.file_uploader("恢复网页cache")
+        if pkl:
+            d = pickle.loads(pkl.read())
+            st.toast(d, icon="💾")
+            for k,v in d.items():
+                st.session_state[k] = v
+        
+        st.download_button("保存网页cache", pickle.dumps(st.session_state.to_dict()), f'st_cached_{datetime.now()}.pkl')
+    
+    is_generating = False
     is_generating = st.button("✨ 生成噪声地图")
+
     # 基础参数设置
     with st.expander("⚙️ 全局参数", expanded=True):
-        world_size = st.slider("世界尺寸", 64, 2048, 64, 32)
-        num_layers = st.slider("噪声层数", 1, 8, 3)
-        seed = int(st.text_input("seed (int)", "123456"))
+        world_size = st.slider("世界尺寸", 64, 2048, 64, 32, key="world_size")
+        num_layers = st.slider("噪声层数", 1, 8, 1, key="num_layers")
+        seed = int(st.text_input("seed (int)", "123456", key="seed"))
 
-    with st.expander("⚙️ 组合后处理", expanded=True):
-
-        post_operation = st.selectbox(
-            "后处理运算",
-            [
-                "None",
-                "Power(x, param)",
-                "Log(x, param)",
-                "Sigmoid(x, param)",
-                "Threshold(x, param)",
-                "Add(x, param)",
-                "Multiply(x, param)",
-            ],
-            key="post_op",
-        )
-        post_param = st.slider("后处理参数", -5.0, 5.0, 1.0, 0.1, key="post_param")
+        if st.checkbox("启用全局后处理", False, key="enable_post_processing"):
+            op = st.selectbox(
+                "后处理运算",
+                [
+                    "Power(x, param)",
+                    "Power(param, x)",
+                    "Log(x, param)",
+                    "Sigmoid(x, param)",
+                    "Threshold(x, param)",
+                    "Add(x, param)",
+                    "Multiply(x, param)",
+                    "Laplace(pos)",
+                    "GradientMagnitude(pos)"
+                ],
+                key="post_op",
+            )
+            param = st.number_input("后处理参数", value=1.0, key="post_param")
+            post_operations = [(op, param)]
+        else:
+            post_operations = []
 
     # 图层参数生成
     layer_params = []
@@ -196,6 +302,32 @@ scale​​:
             ]
 
             in_use = st.checkbox(f"启用第{i+1}层", True)
+
+            noise_type = st.selectbox(
+                f"噪声类型{i+1}",
+                ["Perlin", "Voronoi"],
+                key=f"noise_type{i}",
+            )
+            radius = None
+            falloff = None
+            if noise_type == "Voronoi":
+                radius = st.slider(
+                    f"radius {i+1}",
+                    0,
+                    10,
+                    1,
+                    key=f"radius{i}",
+                    help="计算每一个点时考虑周围的晶格点半径(radius=1时考虑3x3), 同时直接影响耗时",
+                )
+                falloff = st.slider(
+                    f"falloff {i+1}",
+                    1.0,
+                    100.0,
+                    1.0,
+                    key=f"falloff{i}",
+                    help="晶格距离对高度贡献权重的衰减因子, 越大代表着近处的晶格越是重要",
+                )
+
             scale = st.slider(
                 f"scale​​ {i+1}",
                 10.0,
@@ -205,7 +337,7 @@ scale​​:
                 help=helps[0],
             )
             octaves = st.slider(
-                f"​​octaves​​ {i+1}", 0, 10, 3, key=f"oct{i}", help=helps[1]
+                f"​​octaves​​ {i+1}", 1, 10, 3, key=f"oct{i}", help=helps[1]
             )
             persistence = st.slider(
                 f"​​persistence​​ {i+1}", 0.0, 2.0, 0.5, key=f"pers{i}", help=helps[2]
@@ -219,98 +351,153 @@ scale​​:
             operations = st.session_state[f"layer_{i}_ops"]
             st.session_state[f"layer_{i}_ops"] = []
             # 显示已有操作
-            num_op = st.slider(f"后处理数量{i}", 0, 10, 0, 1)
+            num_op = st.slider(f"后处理数量{i}", 0, 10, 0, 1, key=f"num_op_{i}")
+            ops = []
             for j in range(num_op):
-                if not len(operations) <= j:
-                    op = operations[j]
-                else:
-                    op = ["None", 0]
 
                 cols = st.columns([3, 3, 1])
                 with cols[0]:
                     new_op = st.selectbox(
-                        f"操作{j+1}类型",
+                        f"操作{i}_{j+1}类型",
                         [
-                            "None",
                             "Power(x, param)",
+                            "Power(param, x)",
                             "Log(x, param)",
                             "Sigmoid(x, param)",
                             "Threshold(x, param)",
                             "Add(x, param)",
                             "Multiply(x, param)",
+                            "Laplace(pos)",
+                            "GradientMagnitude(pos)"
                         ],
-                        index=(
-                            0
-                            if op[0] == "None"
-                            else [
-                                "Power(x, param)",
-                                "Log(x, param)",
-                                "Sigmoid(x, param)",
-                                "Threshold(x, param)",
-                                "Add(x, param)",
-                                "Multiply(x, param)",
-                            ].index(op[0])
-                            + 1
-                        ),
                         key=f"op_{i}_{j}",
                     )
                 with cols[1]:
-                    new_param = st.slider(
-                        f"参数值", -5.0, 5.0, float(op[1]), key=f"param_{i}_{j}"
-                    )
-                op = [new_op, new_param]
-                st.session_state[f"layer_{i}_ops"].append(op)
+                    new_param = st.number_input(f"操作{i}_{j+1} 参数", value=1.0, key=f"param_{i}_{j}")
+                ops.append((new_op, new_param))
+                
+            st.session_state[f"layer_{i}_ops"] = ops
 
             if in_use:
-                layer_params.append(
-                    (
-                        scale,
-                        octaves,
-                        persistence,
-                        lacunarity,
-                        st.session_state[f"layer_{i}_ops"],
+                if noise_type == "Perlin":
+                    layer_params.append(
+                        {
+                            "noise_type": noise_type,
+                            "scale": scale,
+                            "octaves": octaves,
+                            "persistence": persistence,
+                            "lacunarity": lacunarity,
+                            "operations": st.session_state[f"layer_{i}_ops"],
+                        }
                     )
-                )
+                elif noise_type == "Voronoi":
+
+                    layer_params.append(
+                        {
+                            "radius": radius,
+                            "falloff": falloff,
+                            "noise_type": noise_type,
+                            "scale": scale,
+                            "octaves": octaves,
+                            "persistence": persistence,
+                            "lacunarity": lacunarity,
+                            "operations": st.session_state[f"layer_{i}_ops"],
+                        }
+                    )
+                else:
+                    raise ValueError(f"噪声类型错误: {noise_type}")
+
+    now_param = {
+        "world_size": world_size,
+        "seed": seed,
+        "post_operations": post_operations,
+        "layer_params": layer_params,
+    }
+    st.write(now_param)
+    st.session_state.param_hash = nested_hash(now_param)
+
 
     # 生成并处理噪声
     if is_generating:
-        st.session_state.world_size = world_size
-        st.session_state.seed = seed
-        raw_combined = np.zeros((world_size, world_size))
+        
+        for k, v in now_param.items():
+            get_param_state()[k] = v
+            
+
+
         noise_layers = []
+        raw_combined = None
 
         for i, params in enumerate(layer_params):
-            scale, octaves, persistence, lacunarity, operations = params
-            layer = generate_perlin_noise(
-                world_size,
-                world_size,
-                scale=scale,
-                octaves=octaves,
-                persistence=persistence,
-                lacunarity=lacunarity,
-                seed=seed
+            
+            noise_type = params["noise_type"]
+            scale, octaves, persistence, lacunarity, operations = (
+                params["scale"],
+                params["octaves"],
+                params["persistence"],
+                params["lacunarity"],
+                params["operations"],
             )
-            layer = apply_math_operations(layer, operations)
-            noise_layers.append(layer)
-            raw_combined += layer  # 简单叠加
 
+            padded_noise = None
+            if noise_type == "Voronoi":
+                radius, falloff = params["radius"], params["falloff"]
+                padded_noise = generate_voronoi_noise(
+                    world_size+4,
+                    world_size+4,
+                    scale=scale,
+                    radius=radius,
+                    falloff=falloff,
+                    octaves=octaves,
+                    persistence=persistence,
+                    lacunarity=lacunarity,
+                    seed=seed,
+                )
+            elif noise_type == "Perlin":
+                padded_noise = generate_perlin_noise(
+                    world_size+4,
+                    world_size+4,
+                    scale=scale,
+                    octaves=octaves,
+                    persistence=persistence,
+                    lacunarity=lacunarity,
+                    seed=seed,
+                )
+            else:
+                raise ValueError(f"噪声类型错误: {noise_type}")
+            assert padded_noise is not None
+            pad_noise = apply_math_operations(padded_noise, operations)
+            noise_layers.append(pad_noise)
+            if raw_combined is None:
+                raw_combined = pad_noise.copy()
+            else:
+                raw_combined += pad_noise
+
+        assert raw_combined is not None
+        assert noise_layers != []
+        
+        
         st.session_state.noise_layers = noise_layers
-
-        # 保存原始组合结果
         st.session_state.raw_combined = raw_combined
 
         st.session_state.combined = apply_math_operations(
-            st.session_state.raw_combined, [(post_operation, post_param)]
+            st.session_state.raw_combined, get_param_state()["post_operations"]
         )
-        st.session_state.layer_params = layer_params
-        # print(st.session_state.combined[10,10])
 
 
 if True:
+    if "param_hash" not in st.session_state:
+        st.session_state.param_hash = nested_hash({})
+        
+    if st.session_state.param_hash != nested_hash(get_param_state()):
+        st.warning("参数已改变，请重新生成")
 
-    if st.session_state.noise_layers:
+
+    
+    if "combined" in st.session_state:
         st.subheader("可视化结果")
-
+        
+        
         # 添加控制 3D 视角和网格的滑动条
         with st.expander("🎚️ 3D 视图设置"):
             col_elev, col_azim, col_stride = st.columns(3)
@@ -320,47 +507,48 @@ if True:
                 azim = st.slider("方位角 (azim)", 0, 90, 45, key="azim_slider")
             with col_stride:
                 stride_scale = st.slider(
-                    "网格规模", 2, 1000, 30, help="格子数量以及显示时的采样点数量"
+                    "网格规模", 2, 1000, 30, help="格子数量以及显示时的采样点数量", key="stride_slider"
                 )
-                stride = max(st.session_state.world_size // stride_scale, 1)
+                stride = max(get_param_state()["world_size"] // stride_scale, 1)
 
         with st.expander("图表尺寸和dpi"):
             col_w, col_h, col_dpi, col_hor = st.columns(4)
             with col_w:
-                w = st.slider("宽度", 4, 48, 20, 1)
+                w = st.slider("宽度", 4, 48, 20, 1, key="w_slider")
             with col_h:
-                h = st.slider("高度", 4, 48, 16, 1)
+                h = st.slider("高度", 4, 48, 16, 1, key="h_slider")
             with col_dpi:
-                dpi = st.slider("图表dpi", 10, 2000, 300, 1)
+                dpi = st.slider("图表dpi", 10, 2000, 300, 1, key="dpi_slider")
             with col_hor:
-                if st.selectbox("布局方向", ["横向", "纵向"], 1) == "横向":
+                if st.selectbox("布局方向", ["横向", "纵向"], 1, key="hor_selectbox") == "横向":
                     cr = 120
                 else:
                     cr = 210
 
         # 添加切片控制选项
         with st.expander("🔪 切片视图设置"):
-            slice_type = st.radio("切片方向", ["X轴切片", "Y轴切片"], horizontal=True)
+            slice_type = st.radio("切片方向", ["X轴切片", "Y轴切片"], horizontal=True, key="slice_type_radio")
             slice_pos = st.slider(
                 "切片位置",
                 0,
-                st.session_state.world_size - 1,
-                st.session_state.world_size // 2,
+                get_param_state()["world_size"] - 1,
+                get_param_state()["world_size"] // 2,
                 help="选择要查看的切片位置",
+                key="slice_pos_slider",
             )
 
         # 代码生成控制
         with st.expander("👾 代码生成设置"):
-            gen_ascii_terrian = st.checkbox("生成字符画", [True, False])
+            gen_ascii_terrian = st.checkbox("生成字符画", [True, False], key="gen_ascii_terrian_checkbox")
             ascii_terrian_chars = list(
                 st.text_input("代表不同高度的字符(由低到高, 数量不限)", ".*#")
             )
-            ascii_terrian_size = st.slider("字符画尺寸", 20, 300, 60, 20)
+            ascii_terrian_size = st.slider("字符画尺寸", 20, 300, 60, 20, key="ascii_terrian_size_slider")
 
         tabs = st.tabs(
             [f"Layer {i+1}" for i in range(len(st.session_state.noise_layers))]
             + ["Combined"]
-            + ["参数和代码"]
+            + ["参数和代码"],
         )
 
         # 设置全局绘图样式
@@ -375,121 +563,56 @@ if True:
         plt.rcParams["axes.edgecolor"] = "white"
         plt.rcParams["axes.titlecolor"] = "white"
 
-        # 定义绘制切片图的函数
-        def plot_slice(
-            ax,
-            data,
-            slice_type,
-            slice_pos,
-            title="",
-            color=None,
-            linestyle="-",
-            label=None,
-        ):
-            if slice_type == "X轴切片":
-                slice_data = data[slice_pos, :]
-                ax.plot(
-                    np.arange(st.session_state.world_size),
-                    slice_data,
-                    color=color,
-                    linestyle=linestyle,
-                    label=label,
-                )
-                ax.set_title(f"{title} (X = {slice_pos})", color="white")
-            else:
-                slice_data = data[:, slice_pos]
-                ax.plot(
-                    np.arange(st.session_state.world_size),
-                    slice_data,
-                    color=color,
-                    linestyle=linestyle,
-                    label=label,
-                )
-                ax.set_title(f"{title} (Y = {slice_pos})", color="white")
-
-            ax.set_facecolor("#0c1414")
-            ax.tick_params(axis="both", colors="white")
-            ax.grid(color="gray", linestyle=":", alpha=0.5)
-            if label:
-                ax.legend(facecolor="#0c1414", edgecolor="white")
-
-        with tabs[-2]:  # 组合结果页
-            fig = plt.figure(figsize=(w, h))
-            # 3D视图
-            ax1 = fig.add_subplot(cr + 1, projection="3d")
-
-            # 应用网格采样
-            X, Y = np.meshgrid(
-                np.arange(0, st.session_state.combined.shape[1], stride),
-                np.arange(0, st.session_state.combined.shape[0], stride),
-            )
-            Z = st.session_state.combined[::stride, ::stride]
-
-            surf = ax1.plot_surface(
-                X, Y, Z, rstride=1, cstride=1, cmap="rainbow", shade=False
-            )
-            ax1.view_init(elev=elev, azim=azim)
-            if elev == 90:
-                ax1.set_proj_type("ortho")
-                ax1.set_box_aspect([1, 1, 0.001])
-
-            ax1.set_title(
-                f"Combined Layers 3D View (Sampling Distance: {stride})", color="white"
-            )
-            ax1.set_axis_off()
-            fig.colorbar(surf, shrink=0.5, aspect=5, label="Intensity")
-
-            # 切片视图 - 显示组合图层和所有单独图层
-            ax2 = fig.add_subplot(cr + 2)
-
-            plot_slice(
-                ax2,
-                st.session_state.raw_combined,
+        with st.spinner("Wait for it..."):
+            # 定义绘制切片图的函数
+            def plot_slice(
+                ax,
+                data,
                 slice_type,
                 slice_pos,
-                color="white",
-                linestyle="--",
-                label="Combined",
-            )
-
-            plot_slice(
-                ax2,
-                st.session_state.combined,
-                slice_type,
-                slice_pos,
-                color="white",
+                title="",
+                color=None,
                 linestyle="-",
-                label="Combined (Post Processed)",
-            )
+                label=None,
+            ):
+                if slice_type == "X轴切片":
+                    slice_data = data[slice_pos, :]
+                    ax.plot(
+                        np.arange(get_param_state()["world_size"]),
+                        slice_data,
+                        color=color,
+                        linestyle=linestyle,
+                        label=label,
+                    )
+                    ax.set_title(f"{title} (X = {slice_pos})", color="white")
+                else:
+                    slice_data = data[:, slice_pos]
+                    ax.plot(
+                        np.arange(get_param_state()["world_size"]),
+                        slice_data,
+                        color=color,
+                        linestyle=linestyle,
+                        label=label,
+                    )
+                    ax.set_title(f"{title} (Y = {slice_pos})", color="white")
 
-            # 再绘制各单独图层（虚线）
-            colors = plt.cm.tab10.colors  # 使用tab10调色板获取不同颜色
-            for i, layer in enumerate(st.session_state.noise_layers):
-                plot_slice(
-                    ax2,
-                    layer,
-                    slice_type,
-                    slice_pos,
-                    title="Combined Layers Slice",
-                    linestyle="--",
-                    label=f"Layer {i+1}",
-                )
+                ax.set_facecolor("#0c1414")
+                ax.tick_params(axis="both", colors="white")
+                ax.grid(color="gray", linestyle=":", alpha=0.5)
+                if label:
+                    ax.legend(facecolor="#0c1414", edgecolor="white")
 
-            st.pyplot(fig, dpi=dpi)
-
-        for i, layer in enumerate(st.session_state.noise_layers):
-            with tabs[i]:
+            with tabs[-2]:  # 组合结果页
                 fig = plt.figure(figsize=(w, h))
-
-                # 第一行：3D视图和切片视图
-                ax1 = fig.add_subplot(221, projection="3d")
+                # 3D视图
+                ax1 = fig.add_subplot(cr + 1, projection="3d")
 
                 # 应用网格采样
                 X, Y = np.meshgrid(
-                    np.arange(0, layer.shape[1], stride),
-                    np.arange(0, layer.shape[0], stride),
+                    np.arange(0, st.session_state.combined.shape[1], stride),
+                    np.arange(0, st.session_state.combined.shape[0], stride),
                 )
-                Z = layer[::stride, ::stride]
+                Z = st.session_state.combined[::stride, ::stride]
 
                 surf = ax1.plot_surface(
                     X, Y, Z, rstride=1, cstride=1, cmap="rainbow", shade=False
@@ -497,210 +620,197 @@ if True:
                 ax1.view_init(elev=elev, azim=azim)
                 if elev == 90:
                     ax1.set_proj_type("ortho")
-                    
                     ax1.set_box_aspect([1, 1, 0.001])
+
                 ax1.set_title(
-                    f"Layer {i+1} 3D View (Sampling Interval: {stride})", color="white"
+                    f"Combined Layers 3D View (Sampling Distance: {stride})", color="white"
                 )
                 ax1.set_axis_off()
-                fig.colorbar(surf, ax=ax1, shrink=0.5, aspect=5, label="Intensity")
+                fig.colorbar(surf, shrink=0.5, aspect=5, label="Intensity")
 
-                # 切片视图
-                ax2 = fig.add_subplot(222)
-                plot_slice(ax2, layer, slice_type, slice_pos, f"Layer {i+1} Slice")
+                # 切片视图 - 显示组合图层和所有单独图层
+                ax2 = fig.add_subplot(cr + 2)
 
-                # 第二行：直方图
-                ax3 = fig.add_subplot(223)
-                hist, bins = np.histogram(layer.flatten(), bins=50)
-                ax3.bar(bins[:-1], hist, width=0.7 * (bins[1] - bins[0]), color="white")
-                ax3.set_title("Value Distribution Histogram", color="white")
-                ax3.tick_params(axis="both", colors="white")
-                ax3.spines["bottom"].set_color("white")
-                ax3.spines["top"].set_color("white")
-                ax3.spines["left"].set_color("white")
-                ax3.spines["right"].set_color("white")
+                plot_slice(
+                    ax2,
+                    st.session_state.raw_combined[1:-1, 1:-1],
+                    slice_type,
+                    slice_pos,
+                    color="white",
+                    linestyle="--",
+                    label="Combined",
+                )
+
+                plot_slice(
+                    ax2,
+                    st.session_state.combined,
+                    slice_type,
+                    slice_pos,
+                    color="white",
+                    linestyle="-",
+                    label="Combined (Post Processed)",
+                )
+
+                # 再绘制各单独图层（虚线）
+                colors = plt.cm.tab10.colors  # 使用tab10调色板获取不同颜色
+                for i, pad_layer in enumerate(st.session_state.noise_layers):
+                    layer = pad_layer[1:-1, 1:-1]
+                    plot_slice(
+                        ax2,
+                        layer,
+                        slice_type,
+                        slice_pos,
+                        title="Combined Layers Slice",
+                        linestyle="--",
+                        label=f"Layer {i+1}",
+                    )
 
                 st.pyplot(fig, dpi=dpi)
 
-        with tabs[-1]:
+            for i, pad_layer in enumerate(st.session_state.noise_layers):
+                layer = pad_layer[1:-1, 1:-1]
+                with tabs[i]:
+                    fig = plt.figure(figsize=(w, h))
 
-            layers_params = st.session_state.get("layer_params", default=layer_params)
+                    # 第一行：3D视图和切片视图
+                    ax1 = fig.add_subplot(221, projection="3d")
 
-            # 生成代码函数
-            def generate_python_code():
-                # 收集基础参数
-                base_config = {
-                    "post_operation": post_operation,
-                    "post_param": post_param,
-                    'seed': st.session_state.seed
-                }
+                    # 应用网格采样
+                    X, Y = np.meshgrid(
+                        np.arange(0, layer.shape[1], stride),
+                        np.arange(0, layer.shape[0], stride),
+                    )
+                    Z = layer[::stride, ::stride]
 
-                # 收集各层参数
-                layers_config = []
+                    surf = ax1.plot_surface(
+                        X, Y, Z, rstride=1, cstride=1, cmap="rainbow", shade=False
+                    )
+                    ax1.view_init(elev=elev, azim=azim)
+                    if elev == 90:
+                        ax1.set_proj_type("ortho")
 
-                for i, params in enumerate(layers_params):
-                    layer_info = {
-                        "scale": params[0],
-                        "octaves(for pkpy)": params[1],
-                        "persistence": params[2],
-                        "lacunarity": params[3],
-                        "operations": params[4],  # 直接存储操作列表
+                        ax1.set_box_aspect([1, 1, 0.001])
+                    ax1.set_title(
+                        f"Layer {i+1} 3D View (Sampling Interval: {stride})", color="white"
+                    )
+                    ax1.set_axis_off()
+                    fig.colorbar(surf, ax=ax1, shrink=0.5, aspect=5, label="Intensity")
+
+                    # 切片视图
+                    ax2 = fig.add_subplot(222)
+                    plot_slice(ax2, layer, slice_type, slice_pos, f"Layer {i+1} Slice")
+
+                    # 第二行：直方图
+                    ax3 = fig.add_subplot(223)
+                    hist, bins = np.histogram(layer.flatten(), bins=50)
+                    ax3.bar(bins[:-1], hist, width=0.7 * (bins[1] - bins[0]), color="white")
+                    ax3.set_title("Value Distribution Histogram", color="white")
+                    ax3.tick_params(axis="both", colors="white")
+                    ax3.spines["bottom"].set_color("white")
+                    ax3.spines["top"].set_color("white")
+                    ax3.spines["left"].set_color("white")
+                    ax3.spines["right"].set_color("white")
+
+                    st.pyplot(fig, dpi=dpi)
+
+            # 生成代码页
+            with tabs[-1]:
+
+                # 生成代码函数
+                def generate_python_code():
+                    # 收集基础参数
+                    base_config = {
+                        "post_operations": get_param_state()["post_operations"],
+                        "seed": get_param_state()["seed"],
                     }
-                    layers_config.append(layer_info)
 
-                # 生成操作处理代码
-                operations_code = ""
-                for i, layer in enumerate(layers_config):
-                    operations_code += f"""
-                    # Layer {i+1} Operations
-                    layer_operations = {json.dumps(layer['operations'])}"""
+                    # 构建代码模
+                    newline_char = "\n"
 
-                # 构建代码模
-                newline_char = "\n"
-                code_template = f"""
-'''  world_size:{st.session_state.world_size}x{st.session_state.world_size}, chars:{ascii_terrian_chars}
+                    code_template = f"""
+'''  world_size:{get_param_state()['world_size']}x{get_param_state()['world_size']}, chars:{ascii_terrian_chars}
 {terrain_to_ascii(st.session_state.combined, chars=ascii_terrian_chars, size=(ascii_terrian_size, ascii_terrian_size)) if gen_ascii_terrian else ''}
+
+
+
 '''
-
-from perlin import Perlin
+from noises.perlin import Perlin
+from noises.voronoi import Voronoi 
 import math
-from linalg import vec2i
+from vmath import vec2i
 
-
-def apply_operations(x, operations):
-    for op, param in operations:
-        if op == 'Power(x, param)':
-            x = x ** param
-        elif op == 'Log(x, param)':
-            x = math.log(abs(x) + 1e-9)  # 加上小常数以避免对0取对数
-        elif op == 'Sigmoid(x, param)':
-            x = 1 / (1 + math.exp(-param * x))
-        elif op == 'Threshold(x, param)':
-            x = 1.0 if x > param else 0.0
-        elif op == 'Add(x, param)':
-            x = x + param
-        elif op == 'Multiply(x, param)':
-            x = x * param
-    return x  
+from noises.utils import generate_layer_noise, apply_operations_area
 
 base_config = {pprint.pformat(base_config, indent=4).replace('newline_char', '    ')}
 
 
 
-layers_config = {pprint.pformat(layers_config, indent=4).replace('newline_char', '    ').replace('newline_char', '    ')}
+layers_config = {pprint.pformat(get_param_state()['layer_params'], indent=4).replace('newline_char', '    ').replace('newline_char', '    ')}
 
 
 
-def noise(v: vec2, seed=base_config['seed'])->float:
-    '''对硬编码参数的Perlin噪声采样'''
-    combined_noise = 0
+
+def noise_area(bottom_left: vec2i, width: float, height: float, step_size: int, seed: int) -> array2d[float]:
+    voronoi = Voronoi(seed)
+    perlin = Perlin(seed)
+    
+    # 计算基础网格参数
+    cols = max(1, int(width / step_size))
+    rows = max(1, int(height / step_size))
+
+    # 创建坐标网格(使用array2d向量化操作)
+    coords = array2d(cols + 2, rows + 2, default=None)
+    for idx, _ in coords:
+        coords[idx] = vec2i(
+                    bottom_left.x + (idx.x - 1) * step_size,
+                    bottom_left.y + (idx.y - 1) * step_size
+                )
+
+    # 初始化结果数组(带padding)
+    result = array2d(cols, rows, 0)
+    # 逐层生成噪声
     for layer in layers_config:
-        scale, octaves, persistence, lacunarity, operations= (
-            layer['scale'], layer['octaves(for pkpy)'], layer['persistence'],
-            layer['lacunarity'], layer['operations']
-        )
-        noise = perlin_generator = Perlin(seed=seed).noise_ex(v.x/scale, v.y/scale, 0,
-                    octaves,
-                    persistence=persistence,
-                    lacunarity=lacunarity)
-        
-        noise = apply_operations(noise, operations)
-                
-        combined_noise += noise
+        # 生成当前层噪声(使用map向量化计算)
+        padded_layer_noise = coords.map(lambda pos: generate_layer_noise(pos, layer, perlin=perlin, voronoi=voronoi))
+        # 应用层操作(保持padding)
+        layer_noise = apply_operations_area(padded_layer_noise, layer['operations'])
+        # 累加到结果(使用array2d加法)
+        result += layer_noise
 
-    combined_noise = apply_operations(combined_noise, [(base_config['post_operation'], base_config['post_param'])])
-    return combined_noise
+    # 应用后处理并移除padding
+    result = apply_operations_area(result, base_config['post_operations'])[1:-1, 1:-1]
+    return result
+
+
+
 
 # ==== 可视化 ====
 if __name__ == '__main__':
 
     from array2d import array2d
     import random
+    from noises.utils import terrain_to_ascii
     
-    def terrain_to_ascii(terrain, chars=(".", "*", "#"), size=(40, 40)):
-
-        if not chars:
-            raise ValueError("字符列表不能为空")
-    
-        # 获取地形数据的最小和最大值
-        max_h_pos, max_h = max(terrain, key=lambda pos_value_pair: pos_value_pair[1])
-        min_h_pos, min_h = min(terrain, key=lambda pos_value_pair: pos_value_pair[1])
-        
-        if min_h is None or max_h is None:
-            return ""  # 空地形
-    
-        # 计算高度分段阈值
-        num_chars = len(chars)
-        if num_chars == 0:
-            raise ValueError("字符列表不能为空")
-        thresholds = []
-        for i in range(1, num_chars):
-            fraction = i / num_chars
-            thresholds.append(min_h + fraction * (max_h - min_h))
-    
-        # 创建高度到字符的映射函数
-        def height_to_char(h):
-            for i, t in enumerate(thresholds):
-                if h <= t:
-                    return chars[i]
-            return chars[-1]
-    
-        # 处理采样尺寸
-        original_cols = terrain.n_cols
-        original_rows = terrain.n_rows
-        step = 1
-        if size is not None:
-            output_width, output_height = size
-            if output_width <= 0 or output_height <= 0:
-                raise ValueError("输出尺寸必须大于0")
-            x_scale = original_cols / output_width
-            y_scale = original_rows / output_height
-            scale = max(x_scale, y_scale)
-            step = max(int(scale), 1)
-    
-        # 采样原始地形
-        sampled_terrain = terrain[::step, ::step]
-        sampled_data = sampled_terrain.tolist()
-    
-        # 转换为ASCII字符
-        ascii_art = []
-        for row in sampled_data:
-            ascii_row = " ".join([height_to_char(h) for h in row])
-            ascii_art.append(ascii_row)
-    
-        # 添加垂直填充保持比例
-        if size is not None:
-            target_width, target_height = size
-            current_lines = len(ascii_art)
-            if current_lines < target_height:
-                padding_needed = target_height - current_lines
-                padding = random.choices(ascii_art, k=padding_needed)
-                ascii_art.extend(padding)
-    
-        return "\\n".join(ascii_art)
-    
-    result = array2d({st.session_state.world_size},{st.session_state.world_size}, default=noise)   # noise in rect(x:0, y:0, w:{st.session_state.world_size}, h:{st.session_state.world_size})
+    result = noise_area(vec2i(0, 0), {get_param_state()['world_size']}, {get_param_state()['world_size']}, 1, base_config['seed'])
     
     print(terrain_to_ascii(result, size=(result.width, result.height)))
     
     
 """
-                return code_template
+                    return code_template
 
-            code_template = generate_python_code()
+                code_template = generate_python_code()
 
-            st.code(code_template, "python", True)
+                st.code(code_template, "python", True)
 
-            # 创建下载按钮
-            code_blob = io.BytesIO()
-            code_blob.write(code_template.encode("utf-8"))
-            code_blob.seek(0)
+                # 创建下载按钮
+                code_blob = io.BytesIO()
+                code_blob.write(code_template.encode("utf-8"))
+                code_blob.seek(0)
 
-            st.download_button(
-                label=f"⬇️ 下载生成代码 (NoiseGenerator_{datetime.now().strftime('%Y%m%d_%H%M%S')}.py)",
-                data=code_blob,
-                file_name=f"NoiseGenerator_{datetime.now().strftime('%Y%m%d_%H%M%S')}.py",
-                mime="text/plain",
-            )
-            
-            
+                st.download_button(
+                    label=f"⬇️ 下载生成代码 (NoiseGenerator_{datetime.now().strftime('%Y%m%d_%H%M%S')}.py)",
+                    data=code_blob,
+                    file_name=f"NoiseGenerator_{datetime.now().strftime('%Y%m%d_%H%M%S')}.py",
+                    mime="text/plain",
+                )

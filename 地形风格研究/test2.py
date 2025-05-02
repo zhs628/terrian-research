@@ -1,3 +1,33 @@
+"""
+荒原
+
+- 无状态
+    - 山脉: Voronoi(荒原不是山地, 因此山脉比较稀疏)
+        - 山体
+        - 矿脉
+        - 房间壁(外部 bit mask)
+
+    - 裂谷: Voronoi
+
+    - 水洼: 块状分布+零星小水坑
+    
+    - 枯木林: 稀疏的树木
+    
+    - 草丛: 块状分布+零星散布
+    
+    - 复杂结构(种子)
+        - 小型废墟
+        - 迷宫
+    
+- 有状态
+    - 小型废墟
+    - 迷宫
+
+"""
+
+
+
+import random
 from typing import Callable, Literal
 import base
 from array2d import *
@@ -6,21 +36,27 @@ T = TypeVar('T')
 from base import AsciiSprite, TilesetId, get_sprite
 from vmath import color32, vec2i, vec2
 import math
-from noises import test_noise
+from noises import test_noise, rift_noise
+from noises.voronoi import Voronoi
 
 TileIndex = vec2i
  
 # 配置参数
-VIEW_SIZE = 50    # 视口尺寸
+VIEW_SIZE = 100    # 视口尺寸
 
 BASE_POSITION = vec2i(0,0)
 
-SEED = 123456
+SEED = 1234567
 
 world: chunked_array2d[vec2i] = chunked_array2d(16)
 
 SAMPLING_DISTANCE = 1
 
+rnd = random.Random(SEED)
+
+
+def sigmoid(x: float, a:float, b:float) -> float:
+    return 1 / (1 + math.exp(-(a*x-b)))
 
 
 
@@ -72,6 +108,33 @@ def get_dir_tile(dir:vec2) -> TileIndex:
               ]
     return arrows[sector]
 
+def get_contour_tile(height: float, height_range: tuple[float, float]) -> TileIndex:
+    """
+    根据高度值和范围获取等高线TileIndex
+    
+    参数:
+        height: 当前高度值
+        height_range: (min_height, max_height) 高度范围
+        
+    返回:
+        TileIndex 对应等高线的瓦片索引
+    """
+    min_height, max_height = height_range
+    
+    # 计算高度在范围内的归一化值 [0, 1]
+    normalized = (height - min_height) / (max_height - min_height)
+    
+    # 将归一化值映射到等高线瓦片索引 (假设有8个等高线等级)
+    contour_levels = 8
+    level = int(normalized * contour_levels)
+    
+    # 确保level在有效范围内
+    level = max(0, min(contour_levels - 1, level))
+    
+    # 返回对应等高线的TileIndex (假设等高线瓦片在TilesetId.Height中连续排列)
+    return TileIndex(TilesetId.Height, level)
+
+
 def sample(array: array2d[T], distance: int) -> array2d[T]:
     # 确保采样后的数组大小不超过原始数组边界
     sampled_width = (array.width + distance - 1) // distance
@@ -85,64 +148,69 @@ def sample(array: array2d[T], distance: int) -> array2d[T]:
 def threshold(x:float, threshold:float) -> Literal[1,0]:
     return 1 if x > threshold else 0
 
+
+MIN = 10
+MAX = -10
 def compute_tile_on_(global_pos:vec2i) -> TileIndex:
     """计算一个位置的图块"""
     
-    # chasm
-    chasm_layer = TileIndex(TilesetId.Chasm, 0)
     
-    # ground
-    ground_noise, ground_noise_g = test_noise.noise(global_pos, seed=SEED), gradient(global_pos, test_noise.noise)
-    is_higher_ground_area = threshold(ground_noise, 0.075)
-    is_ground_area = threshold(ground_noise, 0.03)
-    is_ground_edge_area = is_ground_area and not is_higher_ground_area
-    
-    ground_layer = TileIndex(TilesetId.Ground, 2) if is_ground_area else None
-    higher_ground_layer = TileIndex(TilesetId.Ground, 3) if is_higher_ground_area else None
-    
+    ground_noise, ground_noise_g = rift_noise.noise(global_pos, seed=SEED), gradient(global_pos, rift_noise.noise)
     gradient_value = ground_noise_g.length()
     
-    # beach
-    is_plat = not threshold(gradient_value, 0.02) and is_ground_area
-    # is_plat = is_ground_area
-    is_beach = is_plat and is_ground_edge_area
+    global MIN, MAX
+    MIN = min(MIN, ground_noise)
+    MAX = max(MAX, ground_noise)
     
-    plat_beach_layer = TileIndex(TilesetId.Tree, 2) if is_beach else None
+    # chasm
+    # chasm_layer = TileIndex(TilesetId.Chasm, 0)
+    
+    # ground
+    ground_layer = TileIndex(TilesetId.Ground, 0) 
+    
+    rift_layer = TileIndex(TilesetId.Rift, 0) if ground_noise else None
     
     
-    # cliff (hard to pass)
-    is_cliff = threshold(gradient_value, 0.012) and is_ground_area
-    
-    cliff_layer = TileIndex (TilesetId.Wall, 1) if is_cliff else None
-    
+    grid_layer = TileIndex(TilesetId.Wall, 2) if global_pos.x % 30 == 0 and global_pos.y % 30 == 0 else None
     
     # overlay all layers
     layers = [
-        chasm_layer,  # 空
-        ground_layer,  # 浅黄色地面 (海平面以上)
-        higher_ground_layer,  # 柠檬黄地面  (海拔更高的地方)
-        plat_beach_layer,  # 椰子树  (海平面以上, 海拔低, 坡度小)
-        # cliff_layer  # 石头 (海平面以上, 坡度大)
+        # chasm_layer,  # 空
+        ground_layer,
+        grid_layer
     ]
     result = None
     for layer in layers[::-1]:
         if layer is not None:
             result = layer
+            assert isinstance(result, TileIndex)
             return result
     
-    if result is None:
-        raise ValueError("No layer found")
     
+    raise ValueError("No layer found")
     
+def compute_area(global_pos:vec2i, wh) -> TileIndex:
     
 
 def generate_world_in_area(base: vec2i, wh: vec2i):
     world_area = world.view_rect(base, wh.x, wh.y)
-    for base, _ in world_area:
-        global_pos = base + world_area.origin
+    compute_points = sample(world_area, SAMPLING_DISTANCE)
+    totals = compute_points.width * compute_points.height
+    count = 0
+    for pos, _ in compute_points:
+        global_pos = pos * SAMPLING_DISTANCE + world_area.origin
         world[global_pos] = compute_tile_on_(global_pos)
-    
-def get_sprite_with_(tile_index: TileIndex) -> AsciiSprite:
+        
+        count += 1
+        if count % 100 == 0:
+            msg = str(round(count/totals*100, 2)) + '%     '
+            print("\r" + msg, end="")
+    print('')
+        
+
+def get_sprite_with_(tile_index: TileIndex|None) -> AsciiSprite:
+    if tile_index == None:
+        return AsciiSprite("❗")
     return get_sprite(tile_index.x, tile_index.y)
 
 def render_world_view() -> array2d[AsciiSprite]:
@@ -150,7 +218,7 @@ def render_world_view() -> array2d[AsciiSprite]:
     return array2d(VIEW_SIZE, VIEW_SIZE, lambda pos: get_sprite_with_(world_view[pos])) 
     
     
-def print_tile(tile: AsciiSprite) -> None:
+def tile_to_str(tile: AsciiSprite) -> None:
     """打印单字符"""
     char = tile.char
     
@@ -174,7 +242,7 @@ def show_view(array: array2d[AsciiSprite]):
         if pos.x == 0:
             print('|', end='')
             
-        print_tile(tile)
+        tile_to_str(tile)
         
         if pos.x == width-1:
             print('|')
@@ -183,6 +251,9 @@ def show_view(array: array2d[AsciiSprite]):
 
 
 if __name__ == "__main__":
+
+
     generate_world_in_area(BASE_POSITION, vec2i(VIEW_SIZE, VIEW_SIZE))
     # print(world.view().render())
     show_view(sample(render_world_view(), SAMPLING_DISTANCE))
+    print(MIN, MAX)
